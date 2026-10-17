@@ -9,8 +9,9 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 
-from .const import DOMAIN, METHODS
+from .const import DOMAIN, METHODS, OBJ
 from .entity import BaseMoonrakerEntity
+from .qidi_box import box_label, drying_active
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ async def async_setup_entry(hass, entry, async_add_devices):
 
     await async_setup_optional_binary_sensors(coordinator, entry, async_add_devices)
     await async_setup_update_binary_sensors(coordinator, entry, async_add_devices)
+    await async_setup_qidi_box_binary_sensors(coordinator, entry, async_add_devices)
 
 
 async def async_setup_optional_binary_sensors(coordinator, entry, async_add_entities):
@@ -98,6 +100,42 @@ async def async_setup_update_binary_sensors(coordinator, entry, async_add_entiti
     coordinator.load_sensor_data([desc])
     await coordinator.async_refresh()
     async_add_entities([MoonrakerBinarySensor(coordinator, entry, desc)])
+
+
+async def async_setup_qidi_box_binary_sensors(coordinator, entry, async_add_entities):
+    """Set up a drying binary sensor for each QIDI Box."""
+
+    object_list = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
+    if "box_extras" not in object_list["objects"]:
+        return
+
+    response = await coordinator.async_fetch_data(
+        METHODS.PRINTER_OBJECTS_QUERY,
+        {OBJ: {"box_extras": ["box_drying_state"]}},
+        quiet=True,
+    )
+    drying_state = response["status"].get("box_extras", {}).get("box_drying_state", {})
+
+    sensors = []
+    for box_key in drying_state:
+        sensors.append(
+            MoonrakerBinarySensorDescription(
+                key=f"qidi_{box_key}_drying",
+                sensor_name="box_extras",
+                is_on_fn=lambda sensor, box_key=box_key: drying_active(
+                    sensor.coordinator.data["status"], box_key
+                ),
+                name=f"{box_label(box_key)} Drying",
+                subscriptions=[("box_extras", "box_drying_state")],
+                icon="mdi:water-percent",
+            )
+        )
+
+    coordinator.load_sensor_data(sensors)
+    await coordinator.async_refresh()
+    async_add_entities(
+        [MoonrakerBinarySensor(coordinator, entry, desc) for desc in sensors]
+    )
 
 
 def update_available_fn(sensor):
