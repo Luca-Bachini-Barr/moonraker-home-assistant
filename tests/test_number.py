@@ -616,7 +616,7 @@ async def test_heater_generic_number_config_fallbacks(hass):
 
     orphan_entity = added_by_name["Orphan Heater Target"]
     assert orphan_entity.native_value == 40.0
-    assert orphan_entity.native_max_value is None
+    assert orphan_entity.native_max_value == 100.0
     assert orphan_entity.native_min_value == 0.0
     assert (
         orphan_entity.update_string
