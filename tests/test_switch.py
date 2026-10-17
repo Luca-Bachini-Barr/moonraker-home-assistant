@@ -101,3 +101,30 @@ async def test_switch_turn_off(hass, switch, switch_type, get_default_api_respon
                 METHODS.PRINTER_GCODE_SCRIPT.value,
                 script=f"SET_PIN PIN={switch.split('_')[3]} VALUE=0",
             )
+
+
+async def test_output_pin_setup_skips_objects_without_config(
+    hass, get_default_api_response
+):
+    """Objects that are not plain output pins must not abort switch setup."""
+    response = {
+        **get_default_api_response,
+        "objects": [
+            *get_default_api_response["objects"],
+            # Vendor firmware object that merely contains "output_pin".
+            "smart_output_pin caselight",
+            # Real output pin that is missing from configfile settings.
+            "output_pin unconfigured",
+        ],
+    }
+
+    with patch("moonraker_api.MoonrakerClient.call_method", return_value=response):
+        config_entry = MockConfigEntry(domain=DOMAIN, data=MOCK_CONFIG, entry_id="test")
+        config_entry.add_to_hass(hass)
+        await hass.config_entries.async_setup(config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert hass.states.get("switch.mainsail_output_pin_digital") is not None
+    assert hass.states.get("switch.mainsail_printer") is not None
+    assert hass.states.get("switch.mainsail_smart_output_pin_caselight") is None
+    assert hass.states.get("switch.mainsail_output_pin_unconfigured") is None

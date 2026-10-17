@@ -167,12 +167,21 @@ async def async_setup_output_pin(coordinator, entry, async_add_entities):
         METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
     )
 
+    config_settings = settings["status"]["configfile"]["settings"]
+
     numbers = []
     for obj in object_list["objects"]:
-        if "output_pin" not in obj:
+        # Only plain [output_pin <name>] objects; vendor variants such as
+        # "smart_output_pin" have no configfile entry and use other semantics.
+        if not obj.startswith("output_pin "):
             continue
 
-        if not settings["status"]["configfile"]["settings"][obj.lower()]["pwm"]:
+        pin_settings = config_settings.get(obj.lower())
+        if pin_settings is None:
+            _LOGGER.debug("Skipping %s: missing from configfile settings", obj)
+            continue
+
+        if not pin_settings.get("pwm"):
             continue
 
         desc = MoonrakerNumberSensorDescription(
