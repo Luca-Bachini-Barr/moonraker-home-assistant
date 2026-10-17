@@ -24,6 +24,7 @@ from homeassistant.core import callback
 
 from .const import DOMAIN, METHODS, OBJ, PRINTERSTATES, PRINTSTATES
 from .entity import BaseMoonrakerEntity
+from .qidi_box import slot_attributes, slot_filament, slot_index
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class MoonrakerSensorDescription(SensorEntityDescription):
     unit: str | None = None
     device_class: str | None = None
     subscriptions: list | None = None
+    attributes_fn: Callable | None = None
 
 
 SENSORS: tuple[MoonrakerSensorDescription, ...] = (
@@ -356,6 +358,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     await async_setup_history_sensors(coordinator, entry, async_add_entities)
     await async_setup_machine_update_sensors(coordinator, entry, async_add_entities)
     await async_setup_queue_sensors(coordinator, entry, async_add_entities)
+    await async_setup_qidi_box_sensors(coordinator, entry, async_add_entities)
     await async_setup_spoolman_sensors(coordinator, entry, async_add_entities)
 
 
@@ -868,6 +871,41 @@ async def _machine_update_updater(coordinator):
     }
 
 
+async def async_setup_qidi_box_sensors(coordinator, entry, async_add_entities):
+    """Set up one filament sensor per QIDI Box slot."""
+
+    object_list = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
+    objects = object_list["objects"]
+    if "save_variables" not in objects:
+        return
+
+    sensors = []
+    for obj in objects:
+        index = slot_index(obj)
+        if index is None:
+            continue
+
+        sensors.append(
+            MoonrakerSensorDescription(
+                key=f"qidi_box_slot{index}_filament",
+                name=f"Box Slot {index + 1} Filament",
+                sensor_name=obj,
+                icon="mdi:spool",
+                value_fn=lambda sensor, index=index: slot_filament(
+                    sensor.coordinator.data["status"], index
+                ),
+                attributes_fn=lambda sensor, index=index: slot_attributes(
+                    sensor.coordinator.data["status"], index
+                ),
+                subscriptions=[("save_variables", "variables"), (obj, "runout_button")],
+            )
+        )
+
+    coordinator.load_sensor_data(sensors)
+    await coordinator.async_refresh()
+    async_add_entities([MoonrakerSensor(coordinator, entry, desc) for desc in sensors])
+
+
 async def async_setup_machine_update_sensors(coordinator, entry, async_add_entities):
     """Test update available."""
     machine_status = await coordinator.async_fetch_data(METHODS.MACHINE_UPDATE_STATUS)
@@ -941,6 +979,12 @@ class MoonrakerSensor(BaseMoonrakerEntity, SensorEntity):
         """Handle updated data from the coordinator."""
         self._attr_native_value = self.entity_description.value_fn(self)
         self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self):
+        """Return extra attributes when the description defines them."""
+        attributes_fn = self.entity_description.attributes_fn
+        return attributes_fn(self) if attributes_fn else None
 
     def empty_result_when_not_printing(self, value=""):
         """Return empty string when not printing."""

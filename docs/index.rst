@@ -40,6 +40,7 @@ This software seems to have issues working on **FLSUN Speeder Pad** and **Sonic 
    :hidden:
 
    entities/sensors
+   entities/qidi_box
    entities/camera
    entities/controls
    entities/calculated_pct
