@@ -110,7 +110,7 @@ async def async_setup_temperature_target(coordinator, entry, async_add_entities)
                 icon="mdi:radiator",
                 unit=UnitOfTemperature.CELSIUS,
                 update_code=f"SET_HEATER_TEMPERATURE HEATER={heater_name or 'heater_generic'} TARGET=",
-                max_value=float(max_temp) if max_temp is not None else None,
+                max_value=float(max_temp) if max_temp is not None else 100.0,
                 min_value=float(min_temp) if min_temp is not None else 0.0,
                 device_class=NumberDeviceClass.TEMPERATURE,
             )
