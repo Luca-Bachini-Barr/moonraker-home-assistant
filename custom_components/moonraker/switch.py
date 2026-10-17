@@ -1,5 +1,6 @@
 """Switch platform for Moonraker integration."""
 
+import logging
 from dataclasses import dataclass
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
@@ -7,6 +8,8 @@ from homeassistant.components.switch import SwitchEntity, SwitchEntityDescriptio
 from .const import DOMAIN, METHODS, OBJ
 from .entity import BaseMoonrakerEntity
 from custom_components.moonraker.__init__ import MoonrakerDataUpdateCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -44,12 +47,21 @@ async def async_setup_output_pin(coordinator, entry, async_add_entities):
         METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
     )
 
+    config_settings = settings["status"]["configfile"]["settings"]
+
     switches = []
     for obj in object_list["objects"]:
-        if "output_pin" not in obj:
+        # Only plain [output_pin <name>] objects; vendor variants such as
+        # "smart_output_pin" have no configfile entry and use other semantics.
+        if not obj.startswith("output_pin "):
             continue
 
-        if settings["status"]["configfile"]["settings"][obj.lower()]["pwm"]:
+        pin_settings = config_settings.get(obj.lower())
+        if pin_settings is None:
+            _LOGGER.debug("Skipping %s: missing from configfile settings", obj)
+            continue
+
+        if pin_settings.get("pwm"):
             continue
 
         desc = MoonrakerSwitchSensorDescription(
