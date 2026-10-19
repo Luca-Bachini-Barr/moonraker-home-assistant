@@ -1,11 +1,12 @@
 """Helpers for the QIDI Box multi-filament feeder exposed through Moonraker.
 
-The QIDI Box adds ``box_stepper slotN`` and ``box_extras`` objects to Klipper
-and stores the per-slot filament selection in ``save_variables`` as numeric
-codes. The lookup tables below mirror the printer's own
-``officiall_filas_list.cfg`` (``[filaN]``, ``[colordict]`` and
-``[vendor_list]`` sections) and are only used to turn those codes into
-readable values.
+The QIDI Box adds ``box_stepper slotN`` and ``box_extras`` objects to Klipper.
+Newer firmware reports decoded per-slot details in ``box_extras.boxes[N]``
+(``filament_info`` and ``dry_state``); older firmware only stores numeric codes
+in ``save_variables`` and drying state in ``box_extras.box_drying_state``. The
+lookup tables below mirror the printer's own ``officiall_filas_list.cfg``
+(``[filaN]``, ``[colordict]`` and ``[vendor_list]`` sections) and are only used
+to turn the older numeric codes into readable values.
 """
 
 import re
@@ -106,12 +107,51 @@ def box_label(box_key: str) -> str:
     return box_key.replace("_", " ").title()
 
 
+SLOTS_PER_BOX = 4
+
+
 def _variables(status: dict[str, Any]) -> dict[str, Any]:
     save_variables = status.get("save_variables")
     variables = (
         save_variables.get("variables") if isinstance(save_variables, dict) else None
     )
     return variables if isinstance(variables, dict) else {}
+
+
+def _boxes(status: dict[str, Any]) -> list[Any]:
+    extras = status.get("box_extras")
+    boxes = extras.get("boxes") if isinstance(extras, dict) else None
+    return boxes if isinstance(boxes, list) else []
+
+
+def _box(status: dict[str, Any], number: int) -> dict[str, Any]:
+    """Return box ``number`` (1-based) from ``box_extras.boxes``, else ``{}``."""
+    boxes = _boxes(status)
+    box = boxes[number - 1] if 0 < number <= len(boxes) else None
+    return box if isinstance(box, dict) else {}
+
+
+def _filament_info(status: dict[str, Any], index: int) -> dict[str, Any]:
+    """Return the decoded ``filament_info`` entry for a slot, else ``{}``."""
+    info = _box(status, index // SLOTS_PER_BOX + 1).get("filament_info")
+    position = index % SLOTS_PER_BOX
+    entry = info[position] if isinstance(info, list) and position < len(info) else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def _lookup(table: dict[int, str], code: Any) -> str | None:
+    return table.get(code) if isinstance(code, int) else None
+
+
+def _hex_color(value: Any) -> str | None:
+    """Return ``#RRGGBB`` from a colour id, hex string or list of hex strings."""
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, int):
+        return _lookup(COLORS, value)
+    if isinstance(value, str) and value:
+        return value if value.startswith("#") else f"#{value}"
+    return None
 
 
 def slot_is_empty(status: dict[str, Any], index: int) -> bool:
@@ -124,30 +164,59 @@ def slot_filament(status: dict[str, Any], index: int) -> str | None:
     """Return the filament name loaded in a slot, or ``Empty``."""
     if slot_is_empty(status, index):
         return "Empty"
+    name = _filament_info(status, index).get("filament_str")
+    if isinstance(name, str) and name:
+        return name
     code = _variables(status).get(f"filament_slot{index}")
     if code is None:
         return None
-    return FILAMENTS.get(code, f"Unknown ({code})")
+    if isinstance(code, int):
+        return FILAMENTS.get(code, f"Unknown ({code})")
+    return str(code)
 
 
 def slot_attributes(status: dict[str, Any], index: int) -> dict[str, Any]:
     """Return decoded slot details for use as entity attributes."""
     variables = _variables(status)
+    info = _filament_info(status, index)
     color_id = variables.get(f"color_slot{index}")
-    vendor_id = variables.get(f"vendor_slot{index}")
+    vendor = info.get("vendor_str")
     return {
-        "color": COLORS.get(color_id),
-        "vendor": VENDORS.get(vendor_id),
-        "filament_id": variables.get(f"filament_slot{index}"),
+        "color": _hex_color(info.get("color_rgb_str")) or _hex_color(color_id),
+        "vendor": vendor
+        if isinstance(vendor, str) and vendor
+        else _lookup(VENDORS, variables.get(f"vendor_slot{index}")),
+        "filament_id": info.get("filament_id", variables.get(f"filament_slot{index}")),
+        "filament_type": info.get("filament_type"),
+        "min_temp": info.get("min_temp"),
+        "max_temp": info.get("max_temp"),
         "color_id": color_id,
         "slot_state": variables.get(f"slot{index}"),
         "runout": slot_is_empty(status, index),
     }
 
 
+def drying_box_keys(status: dict[str, Any]) -> list[str]:
+    """Return keys such as ``box1`` for every box that reports drying state."""
+    extras = status.get("box_extras")
+    drying = extras.get("box_drying_state") if isinstance(extras, dict) else None
+    if isinstance(drying, dict):
+        return list(drying)
+    return [
+        f"box{number}"
+        for number, box in enumerate(_boxes(status), start=1)
+        if isinstance(box, dict) and box.get("is_online") and "dry_state" in box
+    ]
+
+
 def drying_active(status: dict[str, Any], box_key: str) -> bool:
     """Return True when the box reports a non-idle drying state."""
     extras = status.get("box_extras")
     drying = extras.get("box_drying_state") if isinstance(extras, dict) else None
-    state = drying.get(box_key) if isinstance(drying, dict) else None
-    return isinstance(state, dict) and bool(state.get("dry_state"))
+    if isinstance(drying, dict):
+        state = drying.get(box_key)
+        return isinstance(state, dict) and bool(state.get("dry_state"))
+    match = _BOX_RE.match(box_key)
+    if not match:
+        return False
+    return bool(_box(status, int(match.group(1))).get("dry_state"))
