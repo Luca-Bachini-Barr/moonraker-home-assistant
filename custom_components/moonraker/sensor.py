@@ -897,7 +897,11 @@ async def async_setup_qidi_box_sensors(coordinator, entry, async_add_entities):
                 attributes_fn=lambda sensor, index=index: slot_attributes(
                     sensor.coordinator.data["status"], index
                 ),
-                subscriptions=[("save_variables", "variables"), (obj, "runout_button")],
+                subscriptions=[
+                    ("save_variables", "variables"),
+                    ("box_extras", "boxes"),
+                    (obj, "runout_button"),
+                ],
             )
         )
 
