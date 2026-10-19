@@ -11,7 +11,7 @@ from homeassistant.components.binary_sensor import (
 
 from .const import DOMAIN, METHODS, OBJ
 from .entity import BaseMoonrakerEntity
-from .qidi_box import box_label, drying_active
+from .qidi_box import box_label, drying_active, drying_box_keys
 
 
 @dataclass(frozen=True)
@@ -111,13 +111,12 @@ async def async_setup_qidi_box_binary_sensors(coordinator, entry, async_add_enti
 
     response = await coordinator.async_fetch_data(
         METHODS.PRINTER_OBJECTS_QUERY,
-        {OBJ: {"box_extras": ["box_drying_state"]}},
+        {OBJ: {"box_extras": ["box_drying_state", "boxes"]}},
         quiet=True,
     )
-    drying_state = response["status"].get("box_extras", {}).get("box_drying_state", {})
 
     sensors = []
-    for box_key in drying_state:
+    for box_key in drying_box_keys(response["status"]):
         sensors.append(
             MoonrakerBinarySensorDescription(
                 key=f"qidi_{box_key}_drying",
@@ -126,7 +125,10 @@ async def async_setup_qidi_box_binary_sensors(coordinator, entry, async_add_enti
                     sensor.coordinator.data["status"], box_key
                 ),
                 name=f"{box_label(box_key)} Drying",
-                subscriptions=[("box_extras", "box_drying_state")],
+                subscriptions=[
+                    ("box_extras", "box_drying_state"),
+                    ("box_extras", "boxes"),
+                ],
                 icon="mdi:water-percent",
             )
         )
