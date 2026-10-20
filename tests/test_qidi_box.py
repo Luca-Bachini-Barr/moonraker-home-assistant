@@ -8,11 +8,15 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.moonraker.const import DOMAIN
 from custom_components.moonraker.qidi_box import (
     box_label,
+    box_warnings,
     drying_active,
     drying_box_keys,
+    filament_change_attributes,
+    filament_change_state,
     slot_attributes,
     slot_filament,
     slot_index,
+    slot_number,
 )
 
 from .const import MOCK_CONFIG
@@ -356,3 +360,122 @@ def test_new_firmware_drying_helpers():
         slot_filament({"box_extras": {"boxes": [{"filament_info": ["bad"]}]}}, 0)
         is None
     )
+
+
+def _change_status(step="BOX_UNLOAD", *, flow_id=13, active_slot="slot2", **extra):
+    """Return status during a Box V2 filament change (values sampled from a Q2)."""
+    return {
+        "multi_color_controller": {
+            "operation": {
+                "active_slot": active_slot,
+                "box_button_state": 1,
+                "operate_state": 1,
+            },
+            "task": {
+                "flow_id": flow_id,
+                "current_queue": ["BOX_CUT", "BOX_UNLOAD", "BOX_LOAD"],
+                "current_step": step,
+                "is_paused": extra.pop("is_paused", False),
+            },
+            "box_warning_info": extra.pop("warnings", []),
+        },
+        "box_extras": {
+            "is_tool_change": 1,
+            "loaded_slot": extra.pop("loaded_slot", "slot16"),
+        },
+    }
+
+
+async def test_filament_change_sensors(hass, get_default_api_response):
+    """The filament change sensor follows the multi_color_controller task."""
+    response = _new_firmware_response(get_default_api_response)
+    response["objects"].append("multi_color_controller")
+    change = _change_status(warnings=[{"code": 1}])
+    response["status"]["multi_color_controller"] = change["multi_color_controller"]
+    response["status"]["box_extras"].update(change["box_extras"])
+    await _setup(hass, response)
+
+    sensor = hass.states.get("sensor.mainsail_box_filament_change")
+    assert sensor.state == "unloading"
+    assert sensor.attributes["step"] == "BOX_UNLOAD"
+    assert sensor.attributes["steps"] == ["BOX_CUT", "BOX_UNLOAD", "BOX_LOAD"]
+    assert sensor.attributes["target_slot"] == 3
+    assert sensor.attributes["loaded_slot"] is None
+    assert sensor.attributes["flow_id"] == 13
+    assert sensor.attributes["tool_change"] is True
+
+    warnings = hass.states.get("sensor.mainsail_box_warnings")
+    assert warnings.state == "1"
+    assert warnings.attributes["warnings"] == [{"code": 1}]
+
+
+async def test_filament_change_needs_multi_color_controller(
+    hass, get_default_api_response
+):
+    """Older firmware without multi_color_controller gets no change sensors."""
+    await _setup(hass, _new_firmware_response(get_default_api_response))
+
+    assert hass.states.get("sensor.mainsail_box_filament_change") is None
+    assert hass.states.get("sensor.mainsail_box_warnings") is None
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (_change_status("BOX_CUT"), "cutting"),
+        (_change_status("BOX_UNLOAD"), "unloading"),
+        (_change_status("BOX_LOAD"), "loading"),
+        (_change_status("BOX_WIPE"), "wipe"),
+        (_change_status(""), "starting"),
+        (_change_status("BOX_LOAD", is_paused=True), "paused"),
+        (_change_status("", flow_id=None), "changing"),
+        (
+            {"multi_color_controller": {"task": {"flow_id": None}}, "box_extras": {}},
+            "idle",
+        ),
+        ({"box_extras": {"is_tool_change": 0}}, "idle"),
+        ({"multi_color_controller": "bad"}, "idle"),
+        ({}, None),
+    ],
+)
+def test_filament_change_state(status, expected):
+    """Each task step maps to a readable state."""
+    assert filament_change_state(status) == expected
+
+
+def test_filament_change_attributes_idle_and_malformed():
+    """Idle or malformed data gives empty, safe attributes."""
+    idle = filament_change_attributes(
+        {
+            "multi_color_controller": {
+                "operation": {"active_slot": "slot16"},
+                "task": {"flow_id": None, "current_queue": [], "current_step": ""},
+                "box_warning_info": [],
+            },
+            "box_extras": {"is_tool_change": 0, "loaded_slot": "slot0"},
+        }
+    )
+    assert idle == {
+        "step": None,
+        "steps": [],
+        "target_slot": None,
+        "loaded_slot": 1,
+        "flow_id": None,
+        "tool_change": False,
+        "warnings": [],
+    }
+    bad = filament_change_attributes(
+        {"multi_color_controller": {"task": {"current_queue": "x"}}, "box_extras": 1}
+    )
+    assert bad["steps"] == []
+    assert bad["loaded_slot"] is None
+    assert box_warnings({"multi_color_controller": {"box_warning_info": "x"}}) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("slot0", 1), ("slot3", 4), ("slot16", None), ("slotx", None), (None, None)],
+)
+def test_slot_number(value, expected):
+    """Map slotN to a 1-based slot number; slot16 means nothing loaded."""
+    assert slot_number(value) == expected
