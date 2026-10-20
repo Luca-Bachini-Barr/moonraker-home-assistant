@@ -44,6 +44,34 @@ sensor that is on while the box is drying. Newer firmware reports this per box
 in ``box_extras.boxes`` (only boxes that are online get a sensor); older
 firmware uses ``box_extras.box_drying_state``.
 
+Filament change sensors
+-----------------------------
+
+Firmware with the Box V2 ``multi_color_controller`` object also gets:
+
+-  **Box Filament Change**: what the box is doing during a colour change.
+
+   -  The state is ``idle``, ``changing`` (a change is about to start, or the
+      nozzle is being purged afterwards), ``starting``, ``cutting``,
+      ``unloading``, ``loading`` or ``paused``. Other firmware steps are shown
+      in lower case without the ``BOX_`` prefix.
+   -  Attributes:
+
+      -  ``target_slot``: the slot being loaded (1-based), while a change runs
+      -  ``loaded_slot``: the slot currently in the toolhead (1-based), or
+         empty when nothing (or the external spool) is loaded
+      -  ``step`` and ``steps``: the raw current step and the step queue, for
+         example ``BOX_CUT``, ``BOX_UNLOAD``, ``BOX_LOAD``
+      -  ``flow_id``, ``tool_change`` and ``warnings``: the raw values reported
+         by the printer
+
+-  **Box Warnings**: the number of warnings the box reports, with the raw
+   warnings in the ``warnings`` attribute.
+
+A change on a Q2 takes about a minute and a half: ``changing`` for a few
+seconds, then ``cutting``, ``unloading`` and ``loading``, and ``changing`` again
+while the new filament is purged.
+
 Temperature and humidity
 -----------------------------
 
