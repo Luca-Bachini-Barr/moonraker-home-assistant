@@ -220,3 +220,81 @@ def drying_active(status: dict[str, Any], box_key: str) -> bool:
     if not match:
         return False
     return bool(_box(status, int(match.group(1))).get("dry_state"))
+
+
+# Filament changes on Box V2 firmware run as a ``multi_color_controller`` task
+# whose queue is BOX_CUT -> BOX_UNLOAD -> BOX_LOAD. ``box_extras.is_tool_change``
+# is set a few seconds before the task starts and stays set while the nozzle is
+# purged afterwards. ``slot16`` is the external spool / "nothing loaded".
+CHANGE_STEPS = {
+    "BOX_CUT": "cutting",
+    "BOX_UNLOAD": "unloading",
+    "BOX_LOAD": "loading",
+}
+_SLOT_NAME_RE = re.compile(r"^slot(\d+)$")
+EXTERNAL_SLOT = 16
+
+
+def _section(status: dict[str, Any], *keys: str) -> dict[str, Any]:
+    """Return a nested dict from ``status`` (``{}`` when missing or malformed)."""
+    value: Any = status
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def slot_number(value: Any) -> int | None:
+    """Return the 1-based slot number for ``slotN``, or None for ``slot16``."""
+    match = _SLOT_NAME_RE.match(value) if isinstance(value, str) else None
+    if not match or int(match.group(1)) >= EXTERNAL_SLOT:
+        return None
+    return int(match.group(1)) + 1
+
+
+def _change_task(status: dict[str, Any]) -> dict[str, Any]:
+    return _section(status, "multi_color_controller", "task")
+
+
+def _change_active(task: dict[str, Any]) -> bool:
+    return task.get("flow_id") is not None or bool(task.get("current_step"))
+
+
+def filament_change_state(status: dict[str, Any]) -> str | None:
+    """Return the current filament change step, ``changing`` or ``idle``."""
+    if "multi_color_controller" not in status and "box_extras" not in status:
+        return None
+    task = _change_task(status)
+    if _change_active(task):
+        if task.get("is_paused"):
+            return "paused"
+        step = task.get("current_step")
+        if not isinstance(step, str) or not step:
+            return "starting"
+        return CHANGE_STEPS.get(step, step.lower().removeprefix("box_"))
+    if _section(status, "box_extras").get("is_tool_change"):
+        return "changing"
+    return "idle"
+
+
+def box_warnings(status: dict[str, Any]) -> list[Any]:
+    """Return the box warnings reported by ``multi_color_controller``."""
+    warnings = _section(status, "multi_color_controller").get("box_warning_info")
+    return warnings if isinstance(warnings, list) else []
+
+
+def filament_change_attributes(status: dict[str, Any]) -> dict[str, Any]:
+    """Return details of the running (or last) filament change."""
+    task = _change_task(status)
+    active = _change_active(task)
+    operation = _section(status, "multi_color_controller", "operation")
+    queue = task.get("current_queue")
+    step = task.get("current_step")
+    return {
+        "step": step if isinstance(step, str) and step else None,
+        "steps": queue if isinstance(queue, list) else [],
+        "target_slot": slot_number(operation.get("active_slot")) if active else None,
+        "loaded_slot": slot_number(_section(status, "box_extras").get("loaded_slot")),
+        "flow_id": task.get("flow_id"),
+        "tool_change": bool(_section(status, "box_extras").get("is_tool_change")),
+        "warnings": box_warnings(status),
+    }
