@@ -24,7 +24,14 @@ from homeassistant.core import callback
 
 from .const import DOMAIN, METHODS, OBJ, PRINTERSTATES, PRINTSTATES
 from .entity import BaseMoonrakerEntity
-from .qidi_box import slot_attributes, slot_filament, slot_index
+from .qidi_box import (
+    box_warnings,
+    filament_change_attributes,
+    filament_change_state,
+    slot_attributes,
+    slot_filament,
+    slot_index,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -359,6 +366,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     await async_setup_machine_update_sensors(coordinator, entry, async_add_entities)
     await async_setup_queue_sensors(coordinator, entry, async_add_entities)
     await async_setup_qidi_box_sensors(coordinator, entry, async_add_entities)
+    await async_setup_qidi_box_change_sensors(coordinator, entry, async_add_entities)
     await async_setup_spoolman_sensors(coordinator, entry, async_add_entities)
 
 
@@ -904,6 +912,56 @@ async def async_setup_qidi_box_sensors(coordinator, entry, async_add_entities):
                 ],
             )
         )
+
+    coordinator.load_sensor_data(sensors)
+    await coordinator.async_refresh()
+    async_add_entities([MoonrakerSensor(coordinator, entry, desc) for desc in sensors])
+
+
+QIDI_CHANGE_SUBSCRIPTIONS = [
+    ("multi_color_controller", "task"),
+    ("multi_color_controller", "operation"),
+    ("multi_color_controller", "box_warning_info"),
+    ("box_extras", "is_tool_change"),
+    ("box_extras", "loaded_slot"),
+]
+
+
+async def async_setup_qidi_box_change_sensors(coordinator, entry, async_add_entities):
+    """Set up QIDI Box filament change and warning sensors (Box V2 firmware)."""
+
+    object_list = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
+    if "multi_color_controller" not in object_list["objects"]:
+        return
+
+    sensors = [
+        MoonrakerSensorDescription(
+            key="qidi_box_filament_change",
+            name="Box Filament Change",
+            sensor_name="multi_color_controller",
+            icon="mdi:swap-horizontal-circle-outline",
+            value_fn=lambda sensor: filament_change_state(
+                sensor.coordinator.data["status"]
+            ),
+            attributes_fn=lambda sensor: filament_change_attributes(
+                sensor.coordinator.data["status"]
+            ),
+            subscriptions=QIDI_CHANGE_SUBSCRIPTIONS,
+        ),
+        MoonrakerSensorDescription(
+            key="qidi_box_warnings",
+            name="Box Warnings",
+            sensor_name="multi_color_controller",
+            icon="mdi:alert-outline",
+            value_fn=lambda sensor: len(
+                box_warnings(sensor.coordinator.data["status"])
+            ),
+            attributes_fn=lambda sensor: {
+                "warnings": box_warnings(sensor.coordinator.data["status"])
+            },
+            subscriptions=[("multi_color_controller", "box_warning_info")],
+        ),
+    ]
 
     coordinator.load_sensor_data(sensors)
     await coordinator.async_refresh()
