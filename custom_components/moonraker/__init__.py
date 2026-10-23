@@ -11,7 +11,7 @@ from typing import Any
 import async_timeout
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -29,6 +29,7 @@ from .const import (
     DEFAULT_PORT,
     DEVICE_TYPE,
     DOMAIN,
+    GCODE_ACCEPT_TIMEOUT,
     HOSTNAME,
     METHODS,
     OBJ,
@@ -189,6 +190,76 @@ def get_user_name(hass: HomeAssistant, entry: ConfigEntry):
     return device_entries[0].name_by_user
 
 
+def _gcode_error(script: str, err: Exception) -> str | None:
+    """Return a readable error for a failed G-code send, or None if it timed out."""
+    cause = err.__cause__ if isinstance(err, UpdateFailed) else err
+    if isinstance(cause, asyncio.TimeoutError):
+        return None
+    if cause is not None and str(cause):
+        return f"G-code '{script}' failed: {cause}"
+    return f"G-code '{script}' could not be sent to Moonraker"
+
+
+def _gcode_result_error(script: str, result: Any) -> str | None:
+    """Return the error Klipper reported in a printer.gcode.script result."""
+    if not isinstance(result, dict) or "error" not in result:
+        return None
+    error = result["error"]
+    message = error.get("message") if isinstance(error, dict) else error
+    return f"G-code '{script}' failed: {message}"
+
+
+def _log_gcode_result(script: str, task: asyncio.Task) -> None:
+    """Log the outcome of a G-code script that finished after the service returned."""
+    if task.cancelled():
+        return
+    if (err := task.exception()) is not None:
+        message = _gcode_error(script, err)
+        if message is None:
+            _LOGGER.debug(
+                "G-code '%s' still running after the request timed out", script
+            )
+        else:
+            _LOGGER.error(message)
+    elif message := _gcode_result_error(script, task.result()):
+        _LOGGER.error(message)
+    else:
+        _LOGGER.debug("G-code '%s' finished", script)
+
+
+async def _async_send_gcode(
+    hass: HomeAssistant, coordinator, script: str, wait: bool
+) -> None:
+    """Send a G-code script and raise Klipper's error if it fails.
+
+    With wait=False the call returns once the script has run for
+    GCODE_ACCEPT_TIMEOUT seconds without failing, so long commands (filament
+    loads, homing) don't hit moonraker-api's request timeout; their outcome is
+    logged when they finish.
+    """
+    send = coordinator.async_send_data(METHODS.PRINTER_GCODE_SCRIPT, {"script": script})
+    try:
+        if wait:
+            result = await send
+        else:
+            task = hass.async_create_background_task(send, f"{DOMAIN} send_gcode")
+            done, _ = await asyncio.wait({task}, timeout=GCODE_ACCEPT_TIMEOUT)
+            if not done:
+                task.add_done_callback(lambda t: _log_gcode_result(script, t))
+                return
+            result = task.result()
+    except UpdateFailed as err:
+        message = _gcode_error(script, err)
+        if message is None:
+            message = (
+                f"G-code '{script}' did not finish in time; Home Assistant stopped "
+                "waiting but the printer may still be running it"
+            )
+        raise HomeAssistantError(message) from err
+    if message := _gcode_result_error(script, result):
+        raise HomeAssistantError(message)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up this integration using UI."""
 
@@ -268,6 +339,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     async def send_gcode_service(service_call):
         """Handle the service call to send g-code."""
         gcode = service_call.data["gcode"]
+        wait = service_call.data.get("wait", True)
         raw_device_ids = service_call.data["device_id"]
         dev_reg = dr.async_get(hass)
 
@@ -333,10 +405,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                     "Sending G-code via entry %s for device %s", entry_id, device_id
                 )
 
-                await hass.data[DOMAIN][entry_id].async_send_data(
-                    METHODS.PRINTER_GCODE_SCRIPT,
-                    {"script": script},
-                )
+                await _async_send_gcode(hass, hass.data[DOMAIN][entry_id], script, wait)
 
     # Register the new service
     hass.services.async_register(DOMAIN, "send_gcode", send_gcode_service)
@@ -530,7 +599,7 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         except Exception as exception:
             raise UpdateFailed() from exception
 
-    async def _async_send_data(self, query_path: METHODS, query_obj) -> None:
+    async def _async_send_data(self, query_path: METHODS, query_obj) -> Any:
         if not self.moonraker.client.is_connected:
             if not await _async_is_tcp_reachable(
                 self.config_entry.data.get(CONF_URL),
@@ -547,9 +616,10 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
             await self.moonraker.start()
         try:
             if query_obj is None:
-                await self.moonraker.client.call_method(query_path.value)
-            else:
-                await self.moonraker.client.call_method(query_path.value, **query_obj)
+                return await self.moonraker.client.call_method(query_path.value)
+            return await self.moonraker.client.call_method(
+                query_path.value, **query_obj
+            )
         except Exception as exception:
             raise UpdateFailed() from exception
 
