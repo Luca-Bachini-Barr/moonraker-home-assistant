@@ -41,6 +41,9 @@ OBJ = "objects"
 # API timeout
 TIMEOUT = 10
 
+# Seconds send_gcode with wait=False waits for Klipper to reject a script
+GCODE_ACCEPT_TIMEOUT = 5
+
 # CONNECTION DATA
 DEFAULT_PORT = 7125
 

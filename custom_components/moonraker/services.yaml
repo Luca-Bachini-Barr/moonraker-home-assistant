@@ -16,3 +16,10 @@ send_gcode:
       example: "G28"
       selector:
         text:
+    wait:
+      name: "Wait for completion"
+      description: "Wait until the printer has finished the G-code. Turn off for long commands such as filament loads, which take longer than the 120 second request timeout; the call then returns after a few seconds, still reporting errors the printer raises straight away."
+      required: false
+      default: true
+      selector:
+        boolean:
