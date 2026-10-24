@@ -4,6 +4,7 @@ import asyncio
 import logging
 from contextlib import suppress
 import os.path
+import time
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -30,6 +31,7 @@ from .const import (
     DEVICE_TYPE,
     DOMAIN,
     GCODE_ACCEPT_TIMEOUT,
+    GCODE_FAST_POLL_SECONDS,
     HOSTNAME,
     METHODS,
     OBJ,
@@ -37,6 +39,7 @@ from .const import (
     TIMEOUT,
     PRINTSTATES,
 )
+from .qidi_box import filament_change_state
 from .sensor import SENSORS
 
 SCAN_INTERVAL = timedelta(seconds=30)
@@ -405,7 +408,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                     "Sending G-code via entry %s for device %s", entry_id, device_id
                 )
 
-                await _async_send_gcode(hass, hass.data[DOMAIN][entry_id], script, wait)
+                coordinator = hass.data[DOMAIN][entry_id]
+                await _async_send_gcode(hass, coordinator, script, wait)
+                coordinator.poll_fast_for(GCODE_FAST_POLL_SECONDS)
 
     # Register the new service
     hass.services.async_register(DOMAIN, "send_gcode", send_gcode_service)
@@ -462,6 +467,8 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         self.config_entry = config_entry
         self.api_device_name = api_device_name
         self.query_obj = {OBJ: {}}
+        self._fast_poll_until = 0.0
+        self._fast_polling: bool | None = None
         self.load_sensor_data(SENSORS)
         self.add_query_objects("virtual_sdcard", "file_path")
 
@@ -481,15 +488,18 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
             data.update(await updater(self))
 
         # --- Dynamic polling logic ---
-        prev_state = getattr(self, "_last_print_state", None)
-        current_state = data.get("status", {}).get("print_stats", {}).get("state")
-        if current_state != prev_state:
-            if current_state == PRINTSTATES.PRINTING.value:
-                self.update_interval = timedelta(seconds=2)
-            else:
-                self.update_interval = timedelta(seconds=30)
+        # Poll every 2 s while printing, while a QIDI Box filament change runs
+        # (it reports "standby"), and for a short while after send_gcode.
+        status = data.get("status", {})
+        fast = (
+            status.get("print_stats", {}).get("state") == PRINTSTATES.PRINTING.value
+            or filament_change_state(status) not in (None, "idle")
+            or time.monotonic() < self._fast_poll_until
+        )
+        if fast != self._fast_polling:
+            self.update_interval = timedelta(seconds=2 if fast else 30)
             self._schedule_refresh()
-        self._last_print_state = current_state
+        self._fast_polling = fast
         # --- end dynamic polling logic ---
 
         return data
@@ -637,6 +647,19 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
     ):
         """Send data to moonraker."""
         return await self._async_send_data(query_path, query_obj)
+
+    def poll_fast_for(self, seconds: float) -> None:
+        """Poll every 2 s for at least ``seconds``.
+
+        A command such as a QIDI Box filament load takes a few seconds to show
+        up in the printer status, so this covers the gap until the dynamic
+        polling logic sees it running.
+        """
+        self._fast_poll_until = time.monotonic() + seconds
+        if not self._fast_polling:
+            self._fast_polling = True
+            self.update_interval = timedelta(seconds=2)
+            self._schedule_refresh()
 
     def add_data_updater(self, updater):
         """Update the data."""
