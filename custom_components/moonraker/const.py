@@ -44,6 +44,9 @@ TIMEOUT = 10
 # Seconds send_gcode with wait=False waits for Klipper to reject a script
 GCODE_ACCEPT_TIMEOUT = 5
 
+# Seconds to poll every 2 s after send_gcode, until the printer shows the action
+GCODE_FAST_POLL_SECONDS = 30
+
 # CONNECTION DATA
 DEFAULT_PORT = 7125
 
