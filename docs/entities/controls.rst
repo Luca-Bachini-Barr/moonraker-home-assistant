@@ -68,6 +68,8 @@ Each macro configured in Klipper is available as a button.
 If the Macro description is `G-Code macro` it will be enabled by default, otherwise it will be disabled.
 You can enable a specific macro by enabling it's entity in HomeAssistant configuration. (Like any other disabled entity.)
 
+Klipper hides commands whose name starts with an underscore, such as ``_BED_MESH_CALIBRATE``. Their buttons keep the underscore and end in ``(Hidden)``, for example **Macro _Bed Mesh Calibrate (Hidden)**, so they don't share a name or entity ID with a public command of the same name. Buttons that already exist keep their entity ID.
+
 .. note::
 
    Current limitation, we cannot change any parameters for those macros.
