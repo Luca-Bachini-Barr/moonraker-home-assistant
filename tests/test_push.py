@@ -46,7 +46,7 @@ async def _setup(hass):
     config_entry = MockConfigEntry(domain=DOMAIN, data=MOCK_CONFIG, entry_id="test")
     config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(config_entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     coordinator = hass.data[DOMAIN][config_entry.entry_id]
     # Pass on the subscription reply, and stop polling so a poll doesn't
     # replace pushed values while time moves on.
@@ -116,6 +116,8 @@ async def test_subscribes_after_setup(hass, get_default_api_response):
         ({"temperature_fan fan_temp": {"speed": 0.4, "temperature": 30.0}}, True),
         ({"temperature_fan fan_temp": {"target": 40.0}}, False),
         ({"hall_filament_width_sensor": {"Diameter": 1.74, "Raw": 3000}}, True),
+        ({"heater_fan hotend_fan": {"speed": 1.0}}, True),
+        ({"controller_fan board_fan": {"speed": 0.5}}, True),
         ({"webhooks": "not a dict"}, False),
     ],
 )
@@ -276,13 +278,16 @@ async def test_subscribe_failure(hass, result):
     assert await async_unload_entry(hass, config_entry)
 
 
-async def test_push_during_full_update_is_kept(hass, get_default_api_response):
-    """A change pushed after the update's object query isn't overwritten."""
+@pytest.mark.parametrize(
+    "during", [METHODS.PRINTER_OBJECTS_QUERY.value, METHODS.PRINTER_INFO.value]
+)
+async def test_push_during_full_update_is_kept(hass, get_default_api_response, during):
+    """A change pushed while a full update runs isn't overwritten by it."""
     config_entry, coordinator = await _setup(hass)
 
     async def call_method(method, **kwargs):
-        if method == METHODS.PRINTER_INFO.value:
-            # Arrives after the objects query returned the older value
+        if method == during:
+            # Handled before the update applies its older query result
             await _push(coordinator, {"extruder": {"temperature": 222.0}})
         return get_default_api_response
 
@@ -365,6 +370,49 @@ async def test_one_subscription_at_a_time(hass):
         await asyncio.sleep(0)
         await coordinator.moonraker.state_changed(WEBSOCKET_STATE_CONNECTED)
         await asyncio.sleep(0)
+        release.set()
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert calls == 1
+    assert await async_unload_entry(hass, config_entry)
+
+
+async def test_push_during_subscribe_is_kept(hass, get_default_api_response):
+    """A change pushed while a subscribe request runs is applied on its reply."""
+    config_entry, coordinator = await _setup(hass)
+
+    async def call_method(method, **kwargs):
+        await _push(coordinator, {"extruder": {"temperature": 222.0}})
+        return get_default_api_response
+
+    with patch("moonraker_api.MoonrakerClient.call_method", side_effect=call_method):
+        await coordinator.async_subscribe()
+
+    assert coordinator.data["status"]["extruder"]["temperature"] == 222.0
+    assert coordinator._pushed_since_subscribe is None
+    assert await async_unload_entry(hass, config_entry)
+
+
+async def test_setup_subscription_is_tracked(hass):
+    """The setup subscription counts as the one running, so a retry waits."""
+    config_entry = MockConfigEntry(domain=DOMAIN, data=MOCK_CONFIG, entry_id="test")
+    config_entry.add_to_hass(hass)
+    release = asyncio.Event()
+    calls = 0
+
+    async def slow_subscribe(self):
+        nonlocal calls
+        calls += 1
+        await release.wait()
+
+    with patch(
+        "custom_components.moonraker.MoonrakerDataUpdateCoordinator.async_subscribe",
+        slow_subscribe,
+    ):
+        assert await hass.config_entries.async_setup(config_entry.entry_id)
+        coordinator = hass.data[DOMAIN][config_entry.entry_id]
+        await asyncio.sleep(0)
+        coordinator._async_resubscribe()
         release.set()
         await hass.async_block_till_done(wait_background_tasks=True)
 

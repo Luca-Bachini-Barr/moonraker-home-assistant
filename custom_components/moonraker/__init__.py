@@ -378,9 +378,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     finally:
         coordinator.clear_setup_cache()
     # The platforms have added every object they need, so subscribe to them.
-    entry.async_create_task(
-        hass, coordinator.async_subscribe(), "moonraker status subscription"
-    )
+    coordinator.async_start_push()
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     async def send_gcode_service(service_call):
@@ -547,7 +545,9 @@ _MEASURED_FIELDS = frozenset(
 # Measured fields that share a name with a setting on other objects, by
 # object type ("temperature_fan" covers "temperature_fan <name>")
 _MEASURED_OBJECT_FIELDS = {
+    "controller_fan": frozenset({"speed"}),
     "gcode_move": frozenset({"speed"}),
+    "heater_fan": frozenset({"speed"}),
     "temperature_fan": frozenset({"speed"}),
 }
 
@@ -580,12 +580,12 @@ def _merge_status(status: dict[str, Any], changes: dict[str, Any]) -> dict[str, 
 
 
 async def _printer_objects_updater(coordinator):
-    result = await coordinator._async_fetch_data(
+    # Keep what is pushed while the query runs, for the update to apply on top
+    # of its result (see _async_apply_push).
+    coordinator._pushed_since_query = {}
+    return await coordinator._async_fetch_data(
         METHODS.PRINTER_OBJECTS_QUERY, coordinator.query_obj
     )
-    # Changes pushed from now on are newer than this result.
-    coordinator._pushed_since_query = {}
-    return result
 
 
 async def _printer_info_updater(coordinator):
@@ -649,6 +649,8 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         self._subscribe_task: asyncio.Task | None = None
         # Changes pushed while a full update runs, applied on top of its result
         self._pushed_since_query: dict[str, Any] | None = None
+        # Changes pushed while a subscribe request runs, applied on its reply
+        self._pushed_since_subscribe: dict[str, Any] | None = None
         self._push_flush_unsub = None
         client.notification_handler = self._async_handle_notification
         # A new websocket has no subscription.
@@ -1020,6 +1022,7 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         """
         self._push_wanted = True
         self._subscribed = False
+        self._pushed_since_subscribe = {}
         try:
             result = await self._async_fetch_data(
                 METHODS.PRINTER_OBJECTS_SUBSCRIBE,
@@ -1029,6 +1032,9 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         except UpdateFailed as err:
             _LOGGER.debug("Could not subscribe to status updates: %s", err)
             return
+        finally:
+            pushed = self._pushed_since_subscribe
+            self._pushed_since_subscribe = None
         status = result.get("status") if isinstance(result, dict) else None
         if not isinstance(status, dict):
             # e.g. Klippy is not ready; it is retried when Klippy is ready.
@@ -1036,7 +1042,13 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
             return
         self._subscribed = True
         # The reply holds the current values of every subscribed field.
-        self._async_apply_push(status)
+        self._async_apply_push(_merge_status(status, pushed))
+
+    @callback
+    def async_start_push(self) -> None:
+        """Start the status subscription once setup is done."""
+        self._push_wanted = True
+        self._async_resubscribe()
 
     @callback
     def _async_resubscribe(self) -> None:
@@ -1084,9 +1096,16 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         """
         if self.data is None:
             return
+        # A reply can be handled after pushes that Moonraker sent later, so
+        # requests in flight keep every push for their reply. Applying all of
+        # them is safe: each change is pushed, so the last push for a field
+        # holds its newest value.
         if self._pushed_since_query is not None:
-            # A full update is running; keep these for its result.
             self._pushed_since_query = _merge_status(self._pushed_since_query, changes)
+        if self._pushed_since_subscribe is not None:
+            self._pushed_since_subscribe = _merge_status(
+                self._pushed_since_subscribe, changes
+            )
         status = self.data.get("status", {})
         old_state = status.get("print_stats", {}).get("state")
         status = _merge_status(status, changes)
