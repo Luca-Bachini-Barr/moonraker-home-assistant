@@ -518,6 +518,8 @@ def _merge_query(
 # don't multiply the states Home Assistant records.
 _MEASURED_FIELDS = frozenset(
     {
+        "Diameter",
+        "Raw",
         "cputime",
         "estimated_print_time",
         "file_position",
@@ -542,8 +544,12 @@ _MEASURED_FIELDS = frozenset(
         "total_duration",
     }
 )
-# Measured fields that share a name with a setting on other objects
-_MEASURED_OBJECT_FIELDS = frozenset({("gcode_move", "speed")})
+# Measured fields that share a name with a setting on other objects, by
+# object type ("temperature_fan" covers "temperature_fan <name>")
+_MEASURED_OBJECT_FIELDS = {
+    "gcode_move": frozenset({"speed"}),
+    "temperature_fan": frozenset({"speed"}),
+}
 
 
 def _is_measured_change(changes: dict[str, Any]) -> bool:
@@ -551,11 +557,9 @@ def _is_measured_change(changes: dict[str, Any]) -> bool:
     for obj, values in changes.items():
         if not isinstance(values, dict):
             return False
+        object_fields = _MEASURED_OBJECT_FIELDS.get(obj.split(" ", 1)[0], ())
         for field in values:
-            if (
-                field not in _MEASURED_FIELDS
-                and (obj, field) not in _MEASURED_OBJECT_FIELDS
-            ):
+            if field not in _MEASURED_FIELDS and field not in object_fields:
                 return False
     return True
 
@@ -641,12 +645,14 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         # Push updates: set once the status subscription is wanted (after
         # setup), so it is restored when Klippy restarts or we reconnect.
         self._push_wanted = False
+        self._subscribed = False
+        self._subscribe_task: asyncio.Task | None = None
         # Changes pushed while a full update runs, applied on top of its result
         self._pushed_since_query: dict[str, Any] | None = None
         self._push_flush_unsub = None
         client.notification_handler = self._async_handle_notification
         # A new websocket has no subscription.
-        client.connected_handler = self._async_resubscribe
+        client.connected_handler = self._async_websocket_connected
         self.load_sensor_data(SENSORS)
         self.add_query_objects("virtual_sdcard", "file_path")
 
@@ -681,9 +687,13 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         # time, so an update that started earlier can't overwrite that data.
         async with self._new_data_lock:
             try:
-                return await self._async_fetch_all_data()
+                data = await self._async_fetch_all_data()
             finally:
                 self._pushed_since_query = None
+        if not self._subscribed:
+            # Retry a subscription that failed, now Moonraker answers again.
+            self._async_resubscribe()
+        return data
 
     async def _async_fetch_all_data(self):
         """Run every data updater and return the combined data."""
@@ -1009,6 +1019,7 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         between polls. Polling carries on as before and fills any gaps.
         """
         self._push_wanted = True
+        self._subscribed = False
         try:
             result = await self._async_fetch_data(
                 METHODS.PRINTER_OBJECTS_SUBSCRIBE,
@@ -1023,21 +1034,35 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
             # e.g. Klippy is not ready; it is retried when Klippy is ready.
             _LOGGER.debug("Could not subscribe to status updates: %s", result)
             return
+        self._subscribed = True
         # The reply holds the current values of every subscribed field.
         self._async_apply_push(status)
 
     @callback
     def _async_resubscribe(self) -> None:
-        """Restore the status subscription, if one is wanted."""
-        if self._push_wanted:
-            self.config_entry.async_create_background_task(
-                self.hass, self.async_subscribe(), "moonraker status resubscribe"
-            )
+        """Restore the status subscription, if one is wanted.
+
+        A failed attempt is retried after the next successful poll.
+        """
+        if not self._push_wanted:
+            return
+        if self._subscribe_task is not None and not self._subscribe_task.done():
+            return
+        self._subscribe_task = self.config_entry.async_create_background_task(
+            self.hass, self.async_subscribe(), "moonraker status resubscribe"
+        )
+
+    @callback
+    def _async_websocket_connected(self) -> None:
+        """Subscribe again on a new websocket, which has no subscription."""
+        self._subscribed = False
+        self._async_resubscribe()
 
     async def _async_handle_notification(self, method: str, params: Any) -> None:
         """Handle a notification pushed by Moonraker."""
         if method == NOTIFY_KLIPPY_READY:
             # Moonraker drops subscriptions when Klippy restarts.
+            self._subscribed = False
             self._async_resubscribe()
             return
         if method != NOTIFY_STATUS_UPDATE:

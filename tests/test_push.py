@@ -1,5 +1,6 @@
 """Test status updates pushed by Moonraker."""
 
+import asyncio
 import datetime as dt
 from unittest.mock import AsyncMock, PropertyMock, patch
 
@@ -101,6 +102,7 @@ async def test_subscribes_after_setup(hass, get_default_api_response):
     assert calls[0].kwargs["objects"] == coordinator.query_obj["objects"]
     # The extruder number platform's target field is in the subscription
     assert "target" in calls[0].kwargs["objects"]["extruder"]
+    assert coordinator._subscribed
     assert await async_unload_entry(hass, config_entry)
 
 
@@ -111,6 +113,9 @@ async def test_subscribes_after_setup(hass, get_default_api_response):
         ({"gcode_move": {"speed": 1500}, "toolhead": {"position": [1, 2]}}, True),
         ({"extruder": {"temperature": 1.0, "target": 200.0}}, False),
         ({"fan": {"speed": 0.5}}, False),
+        ({"temperature_fan fan_temp": {"speed": 0.4, "temperature": 30.0}}, True),
+        ({"temperature_fan fan_temp": {"target": 40.0}}, False),
+        ({"hall_filament_width_sensor": {"Diameter": 1.74, "Raw": 3000}}, True),
         ({"webhooks": "not a dict"}, False),
     ],
 )
@@ -266,6 +271,7 @@ async def test_subscribe_failure(hass, result):
         await coordinator.async_subscribe()
 
     assert coordinator._push_wanted
+    assert not coordinator._subscribed
     assert coordinator.data is data
     assert await async_unload_entry(hass, config_entry)
 
@@ -325,3 +331,42 @@ async def test_unload_stops_push(hass):
     assert coordinator.moonraker.connected_handler is None
     assert coordinator._push_flush_unsub is None
     assert not coordinator._push_wanted
+
+
+@pytest.mark.parametrize("subscribed", [False, True])
+async def test_poll_retries_failed_subscription(hass, subscribed):
+    """A successful poll subscribes again if the subscription failed."""
+    config_entry, coordinator = await _setup(hass)
+    coordinator._subscribed = subscribed
+
+    with patch.object(
+        coordinator, "async_subscribe", new_callable=AsyncMock
+    ) as subscribe:
+        await coordinator.async_refresh()
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert subscribe.await_count == (0 if subscribed else 1)
+    assert await async_unload_entry(hass, config_entry)
+
+
+async def test_one_subscription_at_a_time(hass):
+    """A resubscribe waits for one already running instead of starting another."""
+    config_entry, coordinator = await _setup(hass)
+    release = asyncio.Event()
+    calls = 0
+
+    async def slow_subscribe():
+        nonlocal calls
+        calls += 1
+        await release.wait()
+
+    with patch.object(coordinator, "async_subscribe", side_effect=slow_subscribe):
+        await coordinator.moonraker.on_notification(NOTIFY_KLIPPY_READY, None)
+        await asyncio.sleep(0)
+        await coordinator.moonraker.state_changed(WEBSOCKET_STATE_CONNECTED)
+        await asyncio.sleep(0)
+        release.set()
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert calls == 1
+    assert await async_unload_entry(hass, config_entry)
