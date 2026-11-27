@@ -10,6 +10,9 @@ from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.moonraker import qidi_box
 from custom_components.moonraker.const import DOMAIN
+from custom_components.moonraker.binary_sensor import (
+    async_setup_qidi_box_binary_sensors,
+)
 from custom_components.moonraker.sensor import async_setup_qidi_box_sensors
 
 from .const import MOCK_CONFIG
@@ -85,8 +88,25 @@ BOX_STATUS = {
     "box_stepper slot1": {"runout_button": 1},
     "box_stepper slot2": {"runout_button": 0},
     "box_stepper slot3": {"runout_button": 0},
+    "multi_color_controller": {
+        "task": {
+            "flow_id": None,
+            "current_queue": [],
+            "current_step": "",
+            "is_paused": False,
+        },
+        "operation": {
+            "box_button_state": 0,
+            "operate_state": 0,
+            "active_slot": "slot16",
+        },
+        "box_warning_info": [],
+    },
 }
-BOX_OBJECTS = ["box_extras", "save_variables"] + [
+BOX_STATUS["box_extras"]["is_tool_change"] = 0
+BOX_STATUS["box_extras"]["boxes"][0]["is_online"] = 1
+BOX_STATUS["box_extras"]["boxes"][0]["dry_state"] = 0
+BOX_OBJECTS = ["box_extras", "save_variables", "multi_color_controller"] + [
     f"box_stepper slot{i}" for i in range(4)
 ]
 
@@ -170,6 +190,82 @@ def test_old_firmware_codes():
     assert qidi_box.slot_filament(status, 1) == "Unknown (99)"
     assert qidi_box.slot_filament(status, 2) == "QFA00"
     assert qidi_box.slot_filament(status, 3) == "Unknown"
+
+
+def test_change_state():
+    """A change reports its step; idle without one; changing while is_tool_change."""
+    status = box_status()
+    assert qidi_box.change_state(status) == "idle"
+    status["box_extras"]["is_tool_change"] = 1
+    assert qidi_box.change_state(status) == "changing"
+    task = status["multi_color_controller"]["task"]
+    task["flow_id"] = 3
+    assert qidi_box.change_state(status) == "starting"
+    task["current_step"] = "BOX_UNLOAD"
+    assert qidi_box.change_state(status) == "unloading"
+    task["current_step"] = "BOX_PURGE"
+    assert qidi_box.change_state(status) == "purge"
+    task["is_paused"] = True
+    assert qidi_box.change_state(status) == "paused"
+    del status["multi_color_controller"]
+    with pytest.raises(KeyError):
+        qidi_box.change_state(status)
+
+
+def test_change_attributes():
+    """The target slot shows only while a change runs; slots are 1-based."""
+    status = box_status()
+    assert qidi_box.change_attributes(status) == {
+        "target_slot": None,
+        "loaded_slot": None,
+        "steps": [],
+    }
+    controller = status["multi_color_controller"]
+    controller["task"].update(
+        flow_id=7,
+        current_step="BOX_LOAD",
+        current_queue=["BOX_CUT", "BOX_UNLOAD", "BOX_LOAD", "BOX_EXTRA", 5],
+    )
+    controller["operation"]["active_slot"] = "slot2"
+    status["box_extras"]["loaded_slot"] = "slot0"
+    assert qidi_box.change_attributes(status) == {
+        "target_slot": 3,
+        "loaded_slot": 1,
+        "steps": ["cutting", "unloading", "loading", "extra"],
+    }
+    controller["task"]["current_queue"] = None
+    controller["operation"] = None
+    assert qidi_box.change_attributes(status)["steps"] == []
+    assert qidi_box.change_attributes(status)["target_slot"] is None
+
+
+def test_box_warnings():
+    """Warnings are passed through; a missing controller raises KeyError."""
+    status = box_status()
+    assert qidi_box.box_warnings(status) == []
+    status["multi_color_controller"]["box_warning_info"] = [{"code": 1}]
+    assert qidi_box.box_warnings(status) == [{"code": 1}]
+    status["multi_color_controller"]["box_warning_info"] = "x"
+    assert qidi_box.box_warnings(status) == []
+    del status["multi_color_controller"]
+    with pytest.raises(KeyError):
+        qidi_box.box_warnings(status)
+
+
+def test_box_drying():
+    """dry_state turns drying on; a Box without it raises KeyError."""
+    assert qidi_box.box_numbers([0, 1, 2, 3, 4, 7]) == [0, 1]
+    status = box_status()
+    assert qidi_box.box_is_drying(status, 0) is False
+    status["box_extras"]["boxes"][0]["dry_state"] = 1
+    assert qidi_box.box_is_drying(status, 0) is True
+    with pytest.raises(KeyError):
+        qidi_box.box_is_drying(status, 1)
+    del status["box_extras"]["boxes"][0]["dry_state"]
+    with pytest.raises(KeyError):
+        qidi_box.box_is_drying(status, 0)
+    with pytest.raises(KeyError):
+        qidi_box.box_is_drying({"box_extras": {}}, 0)
 
 
 # ---- the sensors ----
@@ -260,3 +356,59 @@ async def test_box_setup_skipped_when_object_list_fails():
 
     add_entities.assert_not_called()
     coordinator.load_sensor_data.assert_not_called()
+
+
+async def test_box_change_and_drying_sensors(hass, get_default_api_response):
+    """A Box with multi_color_controller gets change, warnings and drying sensors."""
+    status = box_status()
+    controller = status["multi_color_controller"]
+    controller["task"].update(flow_id=2, current_step="BOX_LOAD")
+    controller["operation"]["active_slot"] = "slot3"
+    controller["box_warning_info"] = ["Slot 4 filament tangled"]
+    status["box_extras"]["boxes"][0]["dry_state"] = 1
+    await _setup(hass, get_default_api_response, BOX_OBJECTS, status)
+
+    state = hass.states.get("sensor.mainsail_box_filament_change")
+    assert state.state == "loading"
+    assert state.attributes["target_slot"] == 4
+    state = hass.states.get("sensor.mainsail_box_warnings")
+    assert state.state == "1"
+    assert state.attributes["warnings"] == ["Slot 4 filament tangled"]
+    assert hass.states.get("binary_sensor.mainsail_box_1_drying").state == "on"
+
+
+async def test_box_without_controller(hass, get_default_api_response):
+    """Older Box firmware without multi_color_controller: no change or warnings sensors."""
+    status = box_status()
+    del status["multi_color_controller"]
+    objects = [o for o in BOX_OBJECTS if o != "multi_color_controller"]
+    await _setup(hass, get_default_api_response, objects, status)
+
+    assert hass.states.get("sensor.mainsail_box_filament_change") is None
+    assert hass.states.get("sensor.mainsail_box_warnings") is None
+    assert hass.states.get("binary_sensor.mainsail_box_1_drying").state == "off"
+
+
+async def test_controller_missing_from_status(hass, get_default_api_response):
+    """A listed controller that reports nothing leaves its sensors unavailable."""
+    status = box_status()
+    del status["multi_color_controller"]
+    status["box_extras"] = {}
+    await _setup(hass, get_default_api_response, BOX_OBJECTS, status)
+
+    state = hass.states.get("sensor.mainsail_box_warnings")
+    assert state.state == "unavailable"
+    assert "warnings" not in state.attributes
+    assert hass.states.get("sensor.mainsail_box_filament_change").state == "unavailable"
+    assert hass.states.get("binary_sensor.mainsail_box_1_drying").state == "unavailable"
+
+
+async def test_box_binary_setup_skipped_when_object_list_fails():
+    """A failing object list skips the drying sensors instead of failing the platform."""
+    coordinator = MagicMock()
+    coordinator.async_get_printer_objects_list = AsyncMock(side_effect=UpdateFailed)
+    add_entities = MagicMock()
+
+    await async_setup_qidi_box_binary_sensors(coordinator, MagicMock(), add_entities)
+
+    add_entities.assert_not_called()

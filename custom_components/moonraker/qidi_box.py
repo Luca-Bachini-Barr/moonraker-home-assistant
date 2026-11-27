@@ -209,3 +209,94 @@ def slot_attributes(status: dict[str, Any], index: int) -> dict[str, Any]:
         "max_temp": info.get("max_temp"),
         "runout": empty,
     }
+
+
+# A filament change on a Box runs as a ``multi_color_controller`` task whose
+# queue is BOX_CUT, BOX_UNLOAD, BOX_LOAD. ``box_extras.is_tool_change`` is set
+# a few seconds before the task starts and stays set while the nozzle purges.
+CHANGE_STEPS = {
+    "BOX_CUT": "cutting",
+    "BOX_UNLOAD": "unloading",
+    "BOX_LOAD": "loading",
+}
+
+
+def _change_task(status: dict[str, Any]) -> dict[str, Any]:
+    task = _section(status, "multi_color_controller").get("task")
+    return task if isinstance(task, dict) else {}
+
+
+def _change_running(task: dict[str, Any]) -> bool:
+    return task.get("flow_id") is not None or bool(task.get("current_step"))
+
+
+def _slot_label(value: Any) -> int | None:
+    """Return the 1-based slot for ``slotN`` (as in the slot sensors' names)."""
+    index = slot_number(value)
+    return None if index is None else index + 1
+
+
+def change_state(status: dict[str, Any]) -> str:
+    """Return the step of the filament change, ``changing``, or ``idle``.
+
+    Raises KeyError when the printer reports no ``multi_color_controller``.
+    """
+    if not isinstance(status.get("multi_color_controller"), dict):
+        raise KeyError("multi_color_controller")
+    task = _change_task(status)
+    if _change_running(task):
+        if task.get("is_paused"):
+            return "paused"
+        step = task.get("current_step")
+        if not isinstance(step, str) or not step:
+            return "starting"
+        return CHANGE_STEPS.get(step, step.lower().removeprefix("box_"))
+    if _section(status, "box_extras").get("is_tool_change"):
+        return "changing"
+    return "idle"
+
+
+def change_attributes(status: dict[str, Any]) -> dict[str, Any]:
+    """Return the slot a change loads, the slot that feeds the toolhead, and the steps."""
+    task = _change_task(status)
+    running = _change_running(task)
+    operation = _section(status, "multi_color_controller").get("operation")
+    target = operation.get("active_slot") if isinstance(operation, dict) else None
+    queue = task.get("current_queue")
+    return {
+        "target_slot": _slot_label(target) if running else None,
+        "loaded_slot": _slot_label(_section(status, "box_extras").get("loaded_slot")),
+        "steps": [
+            CHANGE_STEPS.get(step, step.lower().removeprefix("box_"))
+            for step in queue
+            if isinstance(step, str)
+        ]
+        if isinstance(queue, list)
+        else [],
+    }
+
+
+def box_warnings(status: dict[str, Any]) -> list[Any]:
+    """Return the Box warnings, raising KeyError without ``multi_color_controller``."""
+    if not isinstance(status.get("multi_color_controller"), dict):
+        raise KeyError("multi_color_controller")
+    warnings = status["multi_color_controller"].get("box_warning_info")
+    return warnings if isinstance(warnings, list) else []
+
+
+def box_numbers(indices: list[int]) -> list[int]:
+    """Return the 0-based Boxes that hold the 0-based slot ``indices``."""
+    return sorted({index // SLOTS_PER_BOX for index in indices})
+
+
+def box_is_drying(status: dict[str, Any], box: int) -> bool:
+    """Return True while Box ``box`` (0-based) dries its filament.
+
+    Raises KeyError when the Box reports no drying state (off, or firmware
+    without it).
+    """
+    boxes = _section(status, "box_extras").get("boxes")
+    entry = boxes[box] if isinstance(boxes, list) and box < len(boxes) else None
+    if not isinstance(entry, dict) or "dry_state" not in entry:
+        raise KeyError(f"box{box + 1} dry_state")
+    return bool(entry["dry_state"])
