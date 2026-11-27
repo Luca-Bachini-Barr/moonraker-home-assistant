@@ -203,8 +203,9 @@ def test_change_state():
     assert qidi_box.change_state(status) == "starting"
     task["current_step"] = "BOX_UNLOAD"
     assert qidi_box.change_state(status) == "unloading"
-    task["current_step"] = "BOX_PURGE"
-    assert qidi_box.change_state(status) == "purge"
+    # a step this module has no name for is passed on, lower case
+    task["current_step"] = "BOX_NEW_STEP"
+    assert qidi_box.change_state(status) == "new_step"
     task["is_paused"] = True
     assert qidi_box.change_state(status) == "paused"
     del status["multi_color_controller"]
@@ -266,6 +267,13 @@ def test_box_drying():
         qidi_box.box_is_drying(status, 0)
     with pytest.raises(KeyError):
         qidi_box.box_is_drying({"box_extras": {}}, 0)
+    # an offline Box keeps its last dry_state: not a reading
+    status["box_extras"]["boxes"][0].update(dry_state=1, is_online=0)
+    with pytest.raises(KeyError):
+        qidi_box.box_is_drying(status, 0)
+    # firmware without is_online: dry_state alone
+    del status["box_extras"]["boxes"][0]["is_online"]
+    assert qidi_box.box_is_drying(status, 0) is True
 
 
 # ---- the sensors ----
@@ -411,4 +419,5 @@ async def test_box_binary_setup_skipped_when_object_list_fails():
 
     await async_setup_qidi_box_binary_sensors(coordinator, MagicMock(), add_entities)
 
+    coordinator.async_get_printer_objects_list.assert_awaited_once()
     add_entities.assert_not_called()

@@ -292,11 +292,13 @@ def box_numbers(indices: list[int]) -> list[int]:
 def box_is_drying(status: dict[str, Any], box: int) -> bool:
     """Return True while Box ``box`` (0-based) dries its filament.
 
-    Raises KeyError when the Box reports no drying state (off, or firmware
-    without it).
+    Raises KeyError when the Box is offline or reports no drying state (off,
+    or firmware without it): its last ``dry_state`` may be stale.
     """
     boxes = _section(status, "box_extras").get("boxes")
     entry = boxes[box] if isinstance(boxes, list) and box < len(boxes) else None
     if not isinstance(entry, dict) or "dry_state" not in entry:
         raise KeyError(f"box{box + 1} dry_state")
+    if "is_online" in entry and not entry["is_online"]:
+        raise KeyError(f"box{box + 1} offline")
     return bool(entry["dry_state"])
