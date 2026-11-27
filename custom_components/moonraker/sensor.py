@@ -987,11 +987,14 @@ async def async_setup_qidi_box_sensors(coordinator, entry, async_add_entities):
     except UpdateFailed:
         _LOGGER.debug("Printer object list failed, don't set up QIDI Box sensors")
         return
-    indices = qidi_box.slot_indices(object_list.get("objects", []))
+    objects = object_list.get("objects", [])
+    indices = qidi_box.slot_indices(objects)
     if not indices:
         return
 
     sensors = [create_qidi_box_slot_sensor_description(i) for i in indices]
+    if "multi_color_controller" in objects:
+        sensors += QIDI_BOX_CHANGE_SENSORS
     coordinator.load_sensor_data(sensors)
     await coordinator.async_refresh_new_data()
     async_add_entities(
@@ -1009,6 +1012,13 @@ def _qidi_box_status(sensor):
     if not status.get("box_extras"):
         raise KeyError("box_extras")
     return status
+
+
+def _qidi_box_warning_attributes(sensor):
+    try:
+        return {"warnings": qidi_box.box_warnings(sensor.coordinator.data["status"])}
+    except KeyError:
+        return {}
 
 
 def create_qidi_box_slot_sensor_description(slot_index):
@@ -1035,6 +1045,37 @@ def create_qidi_box_slot_sensor_description(slot_index):
         ],
         icon="mdi:printer-3d-nozzle",
     )
+
+
+QIDI_BOX_CHANGE_SENSORS = [
+    U1ExtruderFilamentSensorDescription(
+        key="box_filament_change",
+        name="Box Filament Change",
+        value_fn=lambda sensor: qidi_box.change_state(
+            sensor.coordinator.data["status"]
+        ),
+        extra_state_fn=lambda sensor: qidi_box.change_attributes(
+            sensor.coordinator.data["status"]
+        ),
+        subscriptions=[
+            ("multi_color_controller", "task"),
+            ("multi_color_controller", "operation"),
+            ("box_extras", "is_tool_change"),
+            ("box_extras", "loaded_slot"),
+        ],
+        icon="mdi:swap-horizontal-circle-outline",
+    ),
+    U1ExtruderFilamentSensorDescription(
+        key="box_warnings",
+        name="Box Warnings",
+        value_fn=lambda sensor: len(
+            qidi_box.box_warnings(sensor.coordinator.data["status"])
+        ),
+        extra_state_fn=_qidi_box_warning_attributes,
+        subscriptions=[("multi_color_controller", "box_warning_info")],
+        icon="mdi:alert-outline",
+    ),
+]
 
 
 async def _machine_update_updater(coordinator):

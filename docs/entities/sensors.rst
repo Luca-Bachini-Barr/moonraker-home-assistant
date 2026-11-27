@@ -112,6 +112,12 @@ Sensors that are added on integration startup.
   * - Box Slot 1 Filament to Box Slot N Filament
     - Filament loaded in each slot of a QIDI Box (one sensor per slot the printer reports; slots 1 to 4 are Box 1, 5 to 8 Box 2, and so on). The state is the filament's name, ``Empty`` when the slot's runout switch reports no filament, or ``Unknown``. Attributes: ``color`` (``#RRGGBB``, none for an empty slot), ``active`` (the slot that feeds the toolhead), ``vendor``, ``filament_type``, ``min_temp``, ``max_temp`` and ``runout``. Unavailable while the Box is off. Created when the printer reports a QIDI Box (tested on a Q2 with one Box).
     - From Klipper (box_extras, save_variables, box_stepper slotN)
+  * - Box Filament Change
+    - Step of a QIDI Box filament change: ``starting``, ``cutting``, ``unloading``, ``loading``, ``paused``, ``changing`` (the nozzle purge after the change), or ``idle``; any other step the firmware reports appears in lower case without its ``BOX_`` prefix (an eject shows ``eject``). Attributes: ``target_slot`` (the slot being loaded, while a change runs), ``loaded_slot`` (the slot that feeds the toolhead, none for the external spool) and ``steps`` (the change's queue). Created when the printer reports a QIDI Box and ``multi_color_controller`` (tested on a Q2 with one Box).
+    - From Klipper (multi_color_controller task and operation, box_extras)
+  * - Box Warnings
+    - Number of warnings the QIDI Box reports, with the warnings in the ``warnings`` attribute. Created with Box Filament Change.
+    - From Klipper (multi_color_controller box_warning_info)
 
 
 History Sensors
@@ -156,6 +162,9 @@ Binary Sensors are used to represent a single binary value. They can are used fo
   * - Filament Width Sensor Active
     - True when the hall filament width sensor reports it is active
     - From Moonraker API (hall_filament_width_sensor, is_active)
+  * - Box 1 Drying to Box N Drying
+    - True while a QIDI Box dries its filament. One per Box the printer reports; unavailable while the Box is off (tested on a Q2 with one Box).
+    - From Klipper (box_extras boxes, dry_state)
 
 Current Layer
 -----------------------------

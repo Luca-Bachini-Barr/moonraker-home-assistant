@@ -9,6 +9,9 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 
+from homeassistant.helpers.update_coordinator import UpdateFailed
+
+from . import qidi_box
 from .const import DOMAIN
 from .entity import BaseMoonrakerEntity
 
@@ -29,6 +32,7 @@ async def async_setup_entry(hass, entry, async_add_devices):
 
     await async_setup_optional_binary_sensors(coordinator, entry, async_add_devices)
     await async_setup_update_binary_sensors(coordinator, entry, async_add_devices)
+    await async_setup_qidi_box_binary_sensors(coordinator, entry, async_add_devices)
 
 
 async def async_setup_optional_binary_sensors(coordinator, entry, async_add_entities):
@@ -78,6 +82,39 @@ async def async_setup_optional_binary_sensors(coordinator, entry, async_add_enti
     await coordinator.async_refresh_new_data()
     async_add_entities(
         [MoonrakerBinarySensor(coordinator, entry, desc) for desc in sensors]
+    )
+
+
+async def async_setup_qidi_box_binary_sensors(coordinator, entry, async_add_entities):
+    """QIDI Box drying sensors, one per Box the printer reports."""
+    try:
+        object_list = await coordinator.async_get_printer_objects_list()
+    except UpdateFailed:
+        return
+    indices = qidi_box.slot_indices(object_list.get("objects", []))
+    sensors = [
+        create_qidi_box_drying_description(box) for box in qidi_box.box_numbers(indices)
+    ]
+    if not sensors:
+        return
+
+    coordinator.load_sensor_data(sensors)
+    await coordinator.async_refresh_new_data()
+    async_add_entities(
+        [MoonrakerBinarySensor(coordinator, entry, desc) for desc in sensors]
+    )
+
+
+def create_qidi_box_drying_description(box):
+    """Create the drying sensor of QIDI Box ``box`` (0-based)."""
+    return MoonrakerBinarySensorDescription(
+        key=f"box{box + 1}_drying",
+        name=f"Box {box + 1} Drying",
+        is_on_fn=lambda sensor: qidi_box.box_is_drying(
+            sensor.coordinator.data["status"], box
+        ),
+        subscriptions=[("box_extras", "boxes")],
+        icon="mdi:water-percent",
     )
 
 
